@@ -1,6 +1,6 @@
 export const config = {
   runtime: 'edge',
-  regions: ['iad1', 'fra1'],
+  regions: ['hnd1', 'kix1', 'icn1', 'sin1', 'bom1', 'iad1'],
 };
 
 export default async function handler(req) {
