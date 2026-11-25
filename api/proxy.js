@@ -1,5 +1,7 @@
 export const config = {
   runtime: 'edge',
+  // Ép buộc chạy tại Bờ Đông nước Mỹ (Washington D.C.) hoặc Đức (Frankfurt), né hoàn toàn Châu Á
+  regions: ['iad1', 'fra1'],
 };
 
 export default async function handler(req) {
@@ -20,15 +22,19 @@ export default async function handler(req) {
     });
   }
 
-  const headers = new Headers(req.headers);
-  headers.delete('host');
-  headers.delete('x-forwarded-host');
-  headers.delete('x-vercel-id');
+  // Chỉ giữ lại đúng các header cần thiết cho API, loại bỏ hoàn toàn dấu vết của trình duyệt/Vercel
+  const cleanHeaders = new Headers();
+  cleanHeaders.set('Content-Type', req.headers.get('content-type') || 'application/json');
+  if (req.headers.get('authorization')) {
+    cleanHeaders.set('Authorization', req.headers.get('authorization'));
+  }
+  cleanHeaders.set('HTTP-Referer', 'https://janitorai.com');
+  cleanHeaders.set('X-Title', 'JanitorAI');
 
   try {
     const response = await fetch(targetUrl, {
       method: req.method,
-      headers: headers,
+      headers: cleanHeaders,
       body: req.method !== 'GET' && req.method !== 'HEAD' ? req.body : undefined,
     });
 
