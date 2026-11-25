@@ -1,16 +1,9 @@
 export const config = {
   runtime: 'edge',
-  // Ép buộc chạy tại Bờ Đông nước Mỹ (Washington D.C.) hoặc Đức (Frankfurt), né hoàn toàn Châu Á
   regions: ['iad1', 'fra1'],
 };
 
 export default async function handler(req) {
-  const url = new URL(req.url);
-  const path = url.searchParams.get('path') || '';
-  url.searchParams.delete('path');
-  const query = url.searchParams.toString();
-  const targetUrl = `https://openrouter.ai{path}${query ? `?${query}` : ''}`;
-
   if (req.method === 'OPTIONS') {
     return new Response(null, {
       status: 204,
@@ -22,7 +15,10 @@ export default async function handler(req) {
     });
   }
 
-  // Chỉ giữ lại đúng các header cần thiết cho API, loại bỏ hoàn toàn dấu vết của trình duyệt/Vercel
+  // Lấy trực tiếp đường dẫn gốc (ví dụ: /api/v1/chat/completions)
+  const url = new URL(req.url);
+  const targetUrl = `https://openrouter.ai${url.pathname}${url.search}`;
+
   const cleanHeaders = new Headers();
   cleanHeaders.set('Content-Type', req.headers.get('content-type') || 'application/json');
   if (req.headers.get('authorization')) {
@@ -47,7 +43,7 @@ export default async function handler(req) {
       headers: resHeaders,
     });
   } catch (err) {
-    return new Response(JSON.stringify({ error: err.message }), {
+    return new Response(JSON.stringify({ error: err.message, target: targetUrl }), {
       status: 500,
       headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
     });
