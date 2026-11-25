@@ -1,51 +1,116 @@
 export const config = {
   runtime: 'edge',
-  regions: ['hnd1', 'kix1', 'icn1', 'sin1', 'bom1', 'iad1'],
+  // Chỉ giữ region gần người dùng; bỏ các region không cần để giảm cold start
+  regions: ['sin1', 'hnd1'],
 };
 
+const TARGET_HOST = 'https://openrouter.ai';
+const ALLOWED_METHODS = 'GET, POST, PUT, PATCH, DELETE, OPTIONS';
+// Nếu muốn giới hạn chỉ cho endpoint chat:
+// const ALLOWED_PATH_PREFIX = '/api/v1/chat/';
+
 export default async function handler(req) {
+  // 1) Preflight
   if (req.method === 'OPTIONS') {
     return new Response(null, {
       status: 204,
       headers: {
         'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-        'Access-Control-Allow-Headers': '*',
+        'Access-Control-Allow-Methods': ALLOWED_METHODS,
+        // Mirror lại header client yêu cầu thay vì dùng '*'
+        'Access-Control-Allow-Headers':
+          req.headers.get('access-control-request-headers') || '*',
+        'Access-Control-Max-Age': '86400',
+        'Vary': 'Access-Control-Request-Headers',
       },
     });
   }
 
-  // Lấy trực tiếp đường dẫn gốc (ví dụ: /api/v1/chat/completions)
+  // 2) (Tuỳ chọn) Chặn path không mong muốn
   const url = new URL(req.url);
-  const targetUrl = `https://openrouter.ai${url.pathname}${url.search}`;
+  // if (!url.pathname.startsWith(ALLOWED_PATH_PREFIX)) {
+  //   return json({ error: 'Forbidden path' }, 403);
+  // }
 
-  const cleanHeaders = new Headers();
-  cleanHeaders.set('Content-Type', req.headers.get('content-type') || 'application/json');
-  if (req.headers.get('authorization')) {
-    cleanHeaders.set('Authorization', req.headers.get('authorization'));
+  // 3) Forward headers cần thiết
+  const headers = new Headers();
+  const forward = [
+    'authorization',
+    'content-type',
+    'accept',
+    'accept-encoding',
+    'user-agent',
+  ];
+  for (const h of forward) {
+    const v = req.headers.get(h);
+    if (v) headers.set(h, v);
   }
-  cleanHeaders.set('HTTP-Referer', 'https://janitorai.com');
-  cleanHeaders.set('X-Title', 'JanitorAI');
+  // Forward mọi header X-* (OpenRouter dùng X-Title, X-...)
+  for (const [k, v] of req.headers) {
+    if (k.toLowerCase().startsWith('x-') && !k.toLowerCase().startsWith('x-forwarded')) {
+      headers.set(k, v);
+    }
+  }
+  // Header bắt buộc cho OpenRouter
+  headers.set('HTTP-Referer', headers.get('HTTP-Referer') || 'https://janitorai.com');
+  headers.set('X-Title', headers.get('X-Title') || 'JanitorAI');
+
+  // 4) Chuẩn bị body — Edge Runtime stream chỉ đọc 1 lần, nên chỉ lấy khi cần
+  const hasBody = !['GET', 'HEAD'].includes(req.method);
+  const body = hasBody ? req.body : undefined;
+
+  // 5) Timeout bằng AbortController (Edge hỗ trợ)
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 60_000); // 60s
 
   try {
-    const response = await fetch(targetUrl, {
+    const targetUrl = `${TARGET_HOST}${url.pathname}${url.search}`;
+    const upstream = await fetch(targetUrl, {
       method: req.method,
-      headers: cleanHeaders,
-      body: req.method !== 'GET' && req.method !== 'HEAD' ? req.body : undefined,
+      headers,
+      body,
+      signal: controller.signal,
+      redirect: 'manual',
     });
 
-    const resHeaders = new Headers(response.headers);
+    // 6) Trả response — stream thẳng, copy header cần thiết
+    const resHeaders = new Headers();
+    // Copy các header quan trọng từ upstream
+    for (const h of [
+      'content-type',
+      'content-length',
+      'cache-control',
+      'openai-model',
+      'openai-processing-ms',
+      'x-request-id',
+    ]) {
+      const v = upstream.headers.get(h);
+      if (v) resHeaders.set(h, v);
+    }
     resHeaders.set('Access-Control-Allow-Origin', '*');
+    resHeaders.set('Access-Control-Expose-Headers', 'x-request-id, openai-model');
 
-    return new Response(response.body, {
-      status: response.status,
-      statusText: response.statusText,
+    return new Response(upstream.body, {
+      status: upstream.status,
       headers: resHeaders,
     });
   } catch (err) {
-    return new Response(JSON.stringify({ error: err.message, target: targetUrl }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
-    });
+    const status = err.name === 'AbortError' ? 504 : 502;
+    return json(
+      { error: err.name === 'AbortError' ? 'Upstream timeout' : err.message },
+      status
+    );
+  } finally {
+    clearTimeout(timeoutId);
   }
+}
+
+function json(obj, status) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+    },
+  });
 }
